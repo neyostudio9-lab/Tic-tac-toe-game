@@ -1,0 +1,358 @@
+/* ==========================================================================
+   TIC-TAC-TOE ARENA - GAME ENGINE LOGIC
+   ========================================================================== */
+
+(function () {
+  'use strict';
+
+  // State
+  let board = Array(9).fill(null);
+  let currentTurn = 'X';
+  let gameActive = true;
+  let isAiMode = false;
+  let scores = { X: 0, O: 0, draws: 0 };
+  let muted = false;
+
+  // Winning Combos
+  const WINNING_COMBOS = [
+    { type: 'row', index: 0, cells: [0, 1, 2] },
+    { type: 'row', index: 1, cells: [3, 4, 5] },
+    { type: 'row', index: 2, cells: [6, 7, 8] },
+    { type: 'col', index: 0, cells: [0, 3, 6] },
+    { type: 'col', index: 1, cells: [1, 4, 7] },
+    { type: 'col', index: 2, cells: [2, 5, 8] },
+    { type: 'diag', index: 0, cells: [0, 4, 8] },
+    { type: 'diag', index: 1, cells: [2, 4, 6] }
+  ];
+
+  // DOM Elements
+  const cells = document.querySelectorAll('.cell');
+  const boardEl = document.getElementById('board');
+  const hudX = document.getElementById('hud-x');
+  const hudO = document.getElementById('hud-o');
+  const scoreXEl = document.getElementById('score-x');
+  const scoreOEl = document.getElementById('score-o');
+  const scoreDrawsEl = document.getElementById('score-draws');
+  const ratioXEl = document.getElementById('ratio-x');
+  const ratioOEl = document.getElementById('ratio-o');
+  const turnIndicator = document.getElementById('turn-indicator');
+  const strikeSvg = document.getElementById('strike-svg');
+  const btnRestart = document.getElementById('btn-restart');
+  const btnReset = document.getElementById('btn-reset');
+  const btnMode = document.getElementById('btn-mode');
+  const btnMute = document.getElementById('btn-mute');
+  const canvas = document.getElementById('particle-canvas');
+
+  // --- Procedural Web Audio Synth ---
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  function playTone(freq, type, duration, endFreq) {
+    if (muted) return;
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    const now = audioCtx.currentTime;
+
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(freq, now);
+    if (endFreq) {
+      osc.frequency.exponentialRampToValueAtTime(endFreq, now + duration);
+    }
+
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + duration);
+  }
+
+  function soundMove(player) {
+    if (player === 'X') {
+      playTone(440, 'triangle', 0.1, 880);
+    } else {
+      playTone(523.25, 'sine', 0.15, 659.25);
+    }
+  }
+
+  function soundWin() {
+    [523.25, 659.25, 783.99, 1046.5].forEach((freq, idx) => {
+      setTimeout(() => playTone(freq, 'triangle', 0.25), idx * 70);
+    });
+  }
+
+  function soundDraw() {
+    [440, 392, 349.23].forEach((freq, idx) => {
+      setTimeout(() => playTone(freq, 'sine', 0.2), idx * 90);
+    });
+  }
+
+  // --- Canvas Particle Burst System ---
+  const ctx = canvas ? canvas.getContext('2d') : null;
+  let particles = [];
+
+  function resizeCanvas() {
+    if (!canvas) return;
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  function spawnParticles(x, y, color) {
+    for (let i = 0; i < 50; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 3 + Math.random() * 8;
+      particles.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 2,
+        life: 60,
+        maxLife: 60,
+        size: 3 + Math.random() * 5,
+        color: Math.random() > 0.5 ? color : '#ffffff'
+      });
+    }
+  }
+
+  function updateParticles() {
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.2; // gravity
+      p.life--;
+
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+    requestAnimationFrame(updateParticles);
+  }
+  requestAnimationFrame(updateParticles);
+
+  // --- Core Game Logic ---
+  function makeMove(index) {
+    if (board[index] !== null || !gameActive) return;
+
+    board[index] = currentTurn;
+    const cellEl = cells[index];
+    cellEl.classList.add(currentTurn === 'X' ? 'marked-x' : 'marked-o');
+    cellEl.disabled = true;
+
+    soundMove(currentTurn);
+
+    // Check Win
+    const win = checkWin();
+    if (win) {
+      handleWin(win);
+      return;
+    }
+
+    // Check Draw
+    if (board.every(cell => cell !== null)) {
+      handleDraw();
+      return;
+    }
+
+    // Switch Turn
+    currentTurn = currentTurn === 'X' ? 'O' : 'X';
+    updateHUD();
+
+    // AI Trigger
+    if (isAiMode && currentTurn === 'O' && gameActive) {
+      setTimeout(makeAiMove, 400);
+    }
+  }
+
+  function checkWin() {
+    for (const combo of WINNING_COMBOS) {
+      const [a, b, c] = combo.cells;
+      if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+        return { winner: board[a], combo };
+      }
+    }
+    return null;
+  }
+
+  function handleWin(win) {
+    gameActive = false;
+    scores[win.winner]++;
+    soundWin();
+
+    // Highlight Cells
+    win.combo.cells.forEach(idx => cells[idx].classList.add('winner'));
+
+    // Board Shake
+    boardEl.classList.add('shake');
+    setTimeout(() => boardEl.classList.remove('shake'), 250);
+
+    // Draw SVG Strike Line
+    drawStrikeLine(win.combo);
+
+    // Particle Burst
+    const rect = boardEl.getBoundingClientRect();
+    spawnParticles(
+      rect.left + rect.width / 2,
+      rect.top + rect.height / 2,
+      win.winner === 'X' ? '#06b6d4' : '#f43f5e'
+    );
+
+    turnIndicator.textContent = `${win.winner} Wins The Round!`;
+    updateHUD();
+  }
+
+  function handleDraw() {
+    gameActive = false;
+    scores.draws++;
+    soundDraw();
+    turnIndicator.textContent = "Stalemate! Cat's Game.";
+    updateHUD();
+  }
+
+  function drawStrikeLine(combo) {
+    const centers = [16.66, 50, 83.33];
+    let x1, y1, x2, y2;
+
+    if (combo.type === 'row') {
+      y1 = y2 = centers[combo.index];
+      x1 = 8; x2 = 92;
+    } else if (combo.type === 'col') {
+      x1 = x2 = centers[combo.index];
+      y1 = 8; y2 = 92;
+    } else if (combo.type === 'diag' && combo.index === 0) {
+      x1 = y1 = 10; x2 = y2 = 90;
+    } else {
+      x1 = 90; y1 = 10; x2 = 10; y2 = 90;
+    }
+
+    strikeSvg.innerHTML = `<line class="strike-path" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"></line>`;
+  }
+
+  // --- Minimax AI for Single-Player ---
+  function makeAiMove() {
+    if (!gameActive) return;
+    let bestScore = -Infinity;
+    let move = -1;
+
+    for (let i = 0; i < 9; i++) {
+      if (board[i] === null) {
+        board[i] = 'O';
+        let score = minimax(board, 0, false);
+        board[i] = null;
+        if (score > bestScore) {
+          bestScore = score;
+          move = i;
+        }
+      }
+    }
+
+    if (move !== -1) {
+      makeMove(move);
+    }
+  }
+
+  function minimax(bd, depth, isMax) {
+    const win = checkWin();
+    if (win) return win.winner === 'O' ? 10 - depth : depth - 10;
+    if (bd.every(c => c !== null)) return 0;
+
+    if (isMax) {
+      let maxScore = -Infinity;
+      for (let i = 0; i < 9; i++) {
+        if (bd[i] === null) {
+          bd[i] = 'O';
+          maxScore = Math.max(maxScore, minimax(bd, depth + 1, false));
+          bd[i] = null;
+        }
+      }
+      return maxScore;
+    } else {
+      let minScore = Infinity;
+      for (let i = 0; i < 9; i++) {
+        if (bd[i] === null) {
+          bd[i] = 'X';
+          minScore = Math.min(minScore, minimax(bd, depth + 1, true));
+          bd[i] = null;
+        }
+      }
+      return minScore;
+    }
+  }
+
+  // --- Reset & HUD Updates ---
+  function updateHUD() {
+    scoreXEl.textContent = scores.X;
+    scoreOEl.textContent = scores.O;
+    scoreDrawsEl.textContent = scores.draws;
+    ratioXEl.textContent = scores.X;
+    ratioOEl.textContent = scores.O;
+
+    if (gameActive) {
+      turnIndicator.textContent = `${currentTurn === 'X' ? 'Player 1' : isAiMode ? 'Bot' : 'Player 2'}'s Turn (${currentTurn})`;
+    }
+
+    hudX.classList.toggle('active-x', currentTurn === 'X' && gameActive);
+    hudO.classList.toggle('active-o', currentTurn === 'O' && gameActive);
+  }
+
+  function restartRound() {
+    board = Array(9).fill(null);
+    gameActive = true;
+    currentTurn = 'X';
+    strikeSvg.innerHTML = '';
+    cells.forEach(cell => {
+      cell.className = 'cell';
+      cell.disabled = false;
+    });
+    updateHUD();
+  }
+
+  function resetAllScores() {
+    scores = { X: 0, O: 0, draws: 0 };
+    restartRound();
+  }
+
+  // --- Event Listeners & Keyboard Hotkeys ---
+  cells.forEach((cell, idx) => {
+    cell.addEventListener('click', () => makeMove(idx));
+  });
+
+  btnRestart.addEventListener('click', restartRound);
+  btnReset.addEventListener('click', resetAllScores);
+
+  btnMode.addEventListener('click', () => {
+    isAiMode = !isAiMode;
+    btnMode.textContent = isAiMode ? 'Mode: Solo vs AI' : 'Mode: 2-Player (PVP)';
+    document.getElementById('name-o-label').textContent = isAiMode ? 'Bot (AI)' : 'Player 2';
+    restartRound();
+  });
+
+  btnMute.addEventListener('click', () => {
+    muted = !muted;
+    btnMute.textContent = muted ? '🔇 Muted' : '🔊 Sound';
+  });
+
+  // Hotkeys: [1-9] Numpad & number row, [R] restart, [M] mute
+  window.addEventListener('keydown', (e) => {
+    if (e.key >= '1' && e.key <= '9') {
+      makeMove(parseInt(e.key) - 1);
+    } else if (e.key === 'r' || e.key === 'R') {
+      restartRound();
+    } else if (e.key === 'm' || e.key === 'M') {
+      btnMute.click();
+    }
+  });
+
+  // Initialize
+  updateHUD();
+})();
